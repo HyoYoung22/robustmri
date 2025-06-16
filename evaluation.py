@@ -3,13 +3,10 @@ import torch
 from skimage.metrics import structural_similarity as ssim
 from sklearn.metrics import auc, roc_curve
 import torchvision.utils as vutils
+import numpy as np
+import os
 
 from helpers import gridify_output
-
-
-
-def main():
-    pass
 
 
 def heatmap(real: torch.Tensor, recon: torch.Tensor, mask, filename, save=True):
@@ -24,13 +21,8 @@ def heatmap(real: torch.Tensor, recon: torch.Tensor, mask, filename, save=True):
         plt.clf()
 
 
-# for anomalous dataset - metric of crossover
-def dice_coeff(real: torch.Tensor, recon: torch.Tensor, real_mask: torch.Tensor, smooth=0.000001, mse=None):
-    # scale_img = lambda img: ((img + 1) * 127.5).clamp(0, 255).to(torch.uint8)
-    # real = scale_img(real.clone().detach())
-    # recon = scale_img(recon.clone().detach())
-    # real_mask = scale_img(real_mask.clone().detach())
-    if mse == None:
+def dice_coeff(real: torch.Tensor, recon: torch.Tensor, real_mask: torch.Tensor, smooth=1e-6, mse=None):
+    if mse is None:
         mse = (real - recon).square()
         mse = (mse > 0.5).float()
     intersection = torch.sum(mse * real_mask, dim=[1, 2, 3])
@@ -47,11 +39,12 @@ def PSNR(recon, real):
 
 
 def SSIM(real, recon):
-    return ssim(real.detach().cpu().numpy(), recon.detach().cpu().numpy(), channel_axis=2)
+    real_np = real.detach().cpu().numpy()
+    recon_np = recon.detach().cpu().numpy()
+    return ssim(real_np, recon_np, channel_axis=2, data_range=1.0)
 
 
 def IoU(real, recon):
-    import numpy as np
     real = real.cpu().numpy()
     recon = recon.cpu().numpy()
     intersection = np.logical_and(real, recon)
@@ -63,7 +56,6 @@ def precision(real_mask, recon_mask):
     TP = ((real_mask == 1) & (recon_mask == 1))
     FP = ((real_mask == 1) & (recon_mask == 0))
     return torch.sum(TP).float() / ((torch.sum(TP) + torch.sum(FP)).float() + 1e-6)
-
 
 
 def recall(real_mask, recon_mask):
@@ -79,7 +71,7 @@ def FPR(real_mask, recon_mask):
 
 
 def ROC_AUC(real_mask, square_error):
-    if type(real_mask) == torch.Tensor:
+    if isinstance(real_mask, torch.Tensor):
         return roc_curve(real_mask.detach().cpu().numpy().flatten(), square_error.detach().cpu().numpy().flatten())
     else:
         return roc_curve(real_mask.flatten(), square_error.flatten())
@@ -90,69 +82,55 @@ def AUC_score(fpr, tpr):
 
 
 def testing(testing_dataset_loader, diffusion, args, ema, model):
-    """
-    Samples videos on test set & calculates some metrics such as PSNR & VLB.
-    PSNR for diffusion is found by sampling x_0 to T//2 and then finding a prediction of x_0
-
-    :param testing_dataset_loader: The cycle(dataloader) object for looping through test set
-    :param diffusion: Gaussian Diffusion model instance
-    :param args: parameters of the model
-    :param ema: exponential moving average unet for sampling
-    :param model: original unet for VLB calc
-    :return: outputs:
-                total VLB    mu +- sigma,
-                prior VLB    mu +- sigma,
-                vb -> T      mu +- sigma,
-                x_0 mse -> T mu +- sigma,
-                mse -> T     mu +- sigma,
-                PSNR         mu +- sigma
-    """
-    import os
-    try:
-        os.makedirs(f'./diffusion-videos/ARGS={args["arg_num"]}/test-set/')
-    except OSError:
-        pass
     ema.eval()
     model.eval()
 
-    plt.rcParams['figure.dpi'] = 200
-    for i in [*range(100, args['sample_distance'], 100)]:
-        data = next(testing_dataset_loader)
-        if args["dataset"] == "cifar" or args["dataset"] == "carpet":
-            # cifar outputs [data,class]
-            x = data[0].to(device)
+    base_save_dir = f'./diffusion-videos/ARGS={args["arg_num"]}/test-set/inferenceimage(0.2)/'
+    input_dir = os.path.join(base_save_dir, 'input')
+    output_dir = os.path.join(base_save_dir, 'output')
+    os.makedirs(input_dir, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
+
+    t_step = 500
+    print(f"\n Sampling at step t={t_step} on full test set...")
+    img_idx = 0
+
+    for batch in testing_dataset_loader:
+        if args["dataset"] in ["cifar", "carpet"]:
+            x = batch[0].to(device)
         else:
-            x = data["image"]
-            x = x.to(device)
+            x = batch["image"].to(device)
 
-        row_size = min(5, args['Batch_Size'])
+        recon = diffusion.forward_backward(ema, x, see_whole_sequence=None, t_distance=t_step)[-1]
 
-        fig, ax = plt.subplots()
-        out = diffusion.forward_backward(ema, x, see_whole_sequence="half", t_distance=i)
-        imgs = [[ax.imshow(gridify_output(x, row_size), animated=True)] for x in out]
-        ani = animation.ArtistAnimation(
-                fig, imgs, interval=200, blit=True,
-                repeat_delay=1000
-                )
+        for i in range(x.size(0)):
+            input_img = x[i].unsqueeze(0)
+            output_img = recon[i].unsqueeze(0)
 
-        files = os.listdir(f'./diffusion-videos/ARGS={args["arg_num"]}/test-set/')
-        ani.save(f'./diffusion-videos/ARGS={args["arg_num"]}/test-set/t={i}-attempts={len(files) + 1}.mp4')
-                # ✅ input 이미지 저장
-        vutils.save_image(x, f'./diffusion-videos/ARGS={args["arg_num"]}/test-set/inferenceimage(0.2)/input-{i}.png', normalize=True)
+            base_input_name = f'input-{t_step}-img{img_idx}'
+            base_output_name = f'output-{t_step}-img{img_idx}'
 
-        # ✅ output 이미지 저장 (마지막 프레임 기준)
-        vutils.save_image(out[-1], f'./diffusion-videos/ARGS={args["arg_num"]}/test-set/inferenceimage(0.2)/output-{i}.png', normalize=True)
+            input_npy_path = os.path.join(input_dir, base_input_name + '.npy')
+            input_png_path = os.path.join(input_dir, base_input_name + '.png')
+            output_npy_path = os.path.join(output_dir, base_output_name + '.npy')
+            output_png_path = os.path.join(output_dir, base_output_name + '.png')
+
+            #np.save(input_npy_path, input_img.squeeze(0).detach().cpu().numpy())
+            #np.save(output_npy_path, output_img.squeeze(0).detach().cpu().numpy())
+
+            vutils.save_image(input_img, input_png_path, normalize=True)
+            vutils.save_image(output_img, output_png_path, normalize=True)
+
+            img_idx += 1
+
     test_iters = 40
-
     vlb = []
     for epoch in range(test_iters // args["Batch_Size"] + 5):
         data = next(testing_dataset_loader)
-        if args["dataset"] != "cifar":
-            x = data["image"]
-            x = x.to(device)
-        else:
-            # cifar outputs [data,class]
+        if args["dataset"] == "cifar":
             x = data[0].to(device)
+        else:
+            x = data["image"].to(device)
 
         vlb_terms = diffusion.calc_total_vlb(x, model, args)
         vlb.append(vlb_terms)
@@ -160,35 +138,29 @@ def testing(testing_dataset_loader, diffusion, args, ema, model):
     psnr = []
     for epoch in range(test_iters // args["Batch_Size"] + 5):
         data = next(testing_dataset_loader)
-        if args["dataset"] != "cifar":
-            x = data["image"]
-            x = x.to(device)
-        else:
-            # cifar outputs [data,class]
+        if args["dataset"] == "cifar":
             x = data[0].to(device)
+        else:
+            x = data["image"].to(device)
 
-        out = diffusion.forward_backward(ema, x, see_whole_sequence=None, t_distance=args["T"] // 2)
+        out = diffusion.forward_backward(ema, x, see_whole_sequence=None, t_distance=500 // 2)
         psnr.append(PSNR(out, x))
 
     print(
-            f"Test set total VLB: {np.mean([i['total_vlb'].mean(dim=-1).cpu().item() for i in vlb])} +- {np.std([i['total_vlb'].mean(dim=-1).cpu().item() for i in vlb])}"
-            )
+        f"Test set total VLB: {np.mean([i['total_vlb'].mean(dim=-1).cpu().item() for i in vlb])} "
+        f"+- {np.std([i['total_vlb'].mean(dim=-1).cpu().item() for i in vlb])}")
     print(
-            f"Test set prior VLB: {np.mean([i['prior_vlb'].mean(dim=-1).cpu().item() for i in vlb])} +-"
-            f" {np.std([i['prior_vlb'].mean(dim=-1).cpu().item() for i in vlb])}"
-            )
+        f"Test set prior VLB: {np.mean([i['prior_vlb'].mean(dim=-1).cpu().item() for i in vlb])} "
+        f"+- {np.std([i['prior_vlb'].mean(dim=-1).cpu().item() for i in vlb])}")
     print(
-            f"Test set vb @ t=200: {np.mean([i['vb'][0][199].cpu().item() for i in vlb])} "
-            f"+- {np.std([i['vb'][0][199].cpu().item() for i in vlb])}"
-            )
+        f"Test set vb @ t=200: {np.mean([i['vb'][0][199].cpu().item() for i in vlb])} "
+        f"+- {np.std([i['vb'][0][199].cpu().item() for i in vlb])}")
     print(
-            f"Test set x_0_mse @ t=200: {np.mean([i['x_0_mse'][0][199].cpu().item() for i in vlb])} "
-            f"+- {np.std([i['x_0_mse'][0][199].cpu().item() for i in vlb])}"
-            )
+        f"Test set x_0_mse @ t=200: {np.mean([i['x_0_mse'][0][199].cpu().item() for i in vlb])} "
+        f"+- {np.std([i['x_0_mse'][0][199].cpu().item() for i in vlb])}")
     print(
-            f"Test set mse @ t=200: {np.mean([i['mse'][0][199].cpu().item() for i in vlb])}"
-            f" +- {np.std([i['mse'][0][199].cpu().item() for i in vlb])}"
-            )
+        f"Test set mse @ t=200: {np.mean([i['mse'][0][199].cpu().item() for i in vlb])} "
+        f"+- {np.std([i['mse'][0][199].cpu().item() for i in vlb])}")
     print(f"Test set PSNR: {np.mean(psnr)} +- {np.std(psnr)}")
 
 
@@ -198,18 +170,22 @@ def main():
 
     in_channels = 3 if args["dataset"].lower() == "cifar" else 1
     unet = UNetModel(
-            args['img_size'][0], args['base_channels'], channel_mults=args['channel_mults'], in_channels=in_channels
-            )
+        args['img_size'][0], args['base_channels'],
+        channel_mults=args['channel_mults'], in_channels=in_channels
+    )
     ema = UNetModel(
-            args['img_size'][0], args['base_channels'], channel_mults=args['channel_mults'], in_channels=in_channels
-            )
+        args['img_size'][0], args['base_channels'],
+        channel_mults=args['channel_mults'], in_channels=in_channels
+    )
 
     betas = get_beta_schedule(args['T'], args['beta_schedule'])
 
     diff = GaussianDiffusionModel(
-            args['img_size'], betas, loss_weight=args['loss_weight'],
-            loss_type=args['loss-type'], noise=args["noise_fn"]
-            )
+        args['img_size'], betas,
+        loss_weight=args['loss_weight'],
+        loss_type=args['loss-type'],
+        noise=args["noise_fn"]
+    )
 
     ema.load_state_dict(output["ema"])
     ema.to(device)
@@ -218,18 +194,15 @@ def main():
     unet.load_state_dict(output["model_state_dict"])
     unet.to(device)
     unet.eval()
+
     _, testing_dataset = dataset.init_datasets("./", args)
     testing_dataset_loader = dataset.init_dataset_loader(testing_dataset, args)
 
     testing(testing_dataset_loader, diff, args, ema, unet)
 
 
-
 if __name__ == '__main__':
     import dataset
-    import os
-    import matplotlib.animation as animation
-    import numpy as np
     from GaussianDiffusion import GaussianDiffusionModel, get_beta_schedule
     from UNet import UNetModel
     from detection import load_parameters

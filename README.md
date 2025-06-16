@@ -4,11 +4,11 @@ This project introduces a Rician-Gaussian Diffusion Model for denoising and synt
 ## How to use
 ### Train
 python3 diffusion_training.py ARGS_NUM
-# Example:
+#### Example:
 python3 diffusion_training.py args38
 
 ### Evaluation
 python3 evaluation.py ARGS_NUM
-# Example:
+#### Example:
 python3 evaluation.py args38
 

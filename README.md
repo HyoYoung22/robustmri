@@ -3,6 +3,6 @@
 
 ## How to use
 ### Train
-#### python3 diffusion_training.py ARGS_NUM
+python3 diffusion_training.py ARGS_NUM
 ### Evaluation
-#### python3 evaluation.py ARGS_NUM
+python3 evaluation.py ARGS_NUM

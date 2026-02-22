@@ -81,51 +81,64 @@ def AUC_score(fpr, tpr):
     return auc(fpr, tpr)
 
 
-def testing(testing_dataset_loader, diffusion, args, ema, model):
+def testing(testing_dataset_loader, diffusion, args, ema, model, max_images=100):
     ema.eval()
     model.eval()
 
-    base_save_dir = f'./diffusion-videos/ARGS={args["arg_num"]}/test-set/inferenceimage(0.2)/'
+    # ✅ 저장 디렉토리 설정
+    base_save_dir = f'./diffusion-videos/ARGS={args["arg_num"]}/test-set/inferenceimage_rgdm/'
     input_dir = os.path.join(base_save_dir, 'input')
     output_dir = os.path.join(base_save_dir, 'output')
     os.makedirs(input_dir, exist_ok=True)
     os.makedirs(output_dir, exist_ok=True)
 
+    # ✅ 복원 이미지 저장 (단일 step: t = args["T"])
     t_step = 500
-    print(f"\n Sampling at step t={t_step} on full test set...")
+    print(f"\n🌀 Sampling at step t={t_step} (saving up to {max_images} images)...")
     img_idx = 0
 
     for batch in testing_dataset_loader:
+        # ✅ 100장 저장하면 종료
+        if img_idx >= max_images:
+            break
+
         if args["dataset"] in ["cifar", "carpet"]:
             x = batch[0].to(device)
         else:
             x = batch["image"].to(device)
 
+        # ⏪ 디노이징 sampling
         recon = diffusion.forward_backward(ema, x, see_whole_sequence=None, t_distance=t_step)[-1]
 
         for i in range(x.size(0)):
+            if img_idx >= max_images:
+                break
+
             input_img = x[i].unsqueeze(0)
             output_img = recon[i].unsqueeze(0)
 
+            # 저장 파일명
             base_input_name = f'input-{t_step}-img{img_idx}'
             base_output_name = f'output-{t_step}-img{img_idx}'
 
-            input_npy_path = os.path.join(input_dir, base_input_name + '.npy')
             input_png_path = os.path.join(input_dir, base_input_name + '.png')
-            output_npy_path = os.path.join(output_dir, base_output_name + '.npy')
             output_png_path = os.path.join(output_dir, base_output_name + '.png')
-
-            #np.save(input_npy_path, input_img.squeeze(0).detach().cpu().numpy())
-            #np.save(output_npy_path, output_img.squeeze(0).detach().cpu().numpy())
 
             vutils.save_image(input_img, input_png_path, normalize=True)
             vutils.save_image(output_img, output_png_path, normalize=True)
 
             img_idx += 1
 
-    test_iters = 40
+    print(f"✅ Saved {img_idx} images to: {base_save_dir}")
+
+    # =========================
+    # ✅ 메트릭 계산도 100장 기준으로 제한
+    # =========================
+    test_iters = min(max_images, 100)  # 원하는 값으로 고정하려면 그냥 test_iters = max_images
     vlb = []
-    for epoch in range(test_iters // args["Batch_Size"] + 5):
+    num_batches = test_iters // args["Batch_Size"] + 1  # +5 대신 딱 필요한 만큼
+
+    for _ in range(num_batches):
         data = next(testing_dataset_loader)
         if args["dataset"] == "cifar":
             x = data[0].to(device)
@@ -136,7 +149,7 @@ def testing(testing_dataset_loader, diffusion, args, ema, model):
         vlb.append(vlb_terms)
 
     psnr = []
-    for epoch in range(test_iters // args["Batch_Size"] + 5):
+    for _ in range(num_batches):
         data = next(testing_dataset_loader)
         if args["dataset"] == "cifar":
             x = data[0].to(device)
@@ -147,21 +160,31 @@ def testing(testing_dataset_loader, diffusion, args, ema, model):
         psnr.append(PSNR(out, x))
 
     print(
-        f"Test set total VLB: {np.mean([i['total_vlb'].mean(dim=-1).cpu().item() for i in vlb])} "
-        f"+- {np.std([i['total_vlb'].mean(dim=-1).cpu().item() for i in vlb])}")
+        f"Test set total VLB (<= {test_iters} imgs): "
+        f"{np.mean([i['total_vlb'].mean(dim=-1).cpu().item() for i in vlb])} "
+        f"+- {np.std([i['total_vlb'].mean(dim=-1).cpu().item() for i in vlb])}"
+    )
     print(
-        f"Test set prior VLB: {np.mean([i['prior_vlb'].mean(dim=-1).cpu().item() for i in vlb])} "
-        f"+- {np.std([i['prior_vlb'].mean(dim=-1).cpu().item() for i in vlb])}")
+        f"Test set prior VLB (<= {test_iters} imgs): "
+        f"{np.mean([i['prior_vlb'].mean(dim=-1).cpu().item() for i in vlb])} "
+        f"+- {np.std([i['prior_vlb'].mean(dim=-1).cpu().item() for i in vlb])}"
+    )
     print(
-        f"Test set vb @ t=200: {np.mean([i['vb'][0][199].cpu().item() for i in vlb])} "
-        f"+- {np.std([i['vb'][0][199].cpu().item() for i in vlb])}")
+        f"Test set vb @ t=200 (<= {test_iters} imgs): "
+        f"{np.mean([i['vb'][0][199].cpu().item() for i in vlb])} "
+        f"+- {np.std([i['vb'][0][199].cpu().item() for i in vlb])}"
+    )
     print(
-        f"Test set x_0_mse @ t=200: {np.mean([i['x_0_mse'][0][199].cpu().item() for i in vlb])} "
-        f"+- {np.std([i['x_0_mse'][0][199].cpu().item() for i in vlb])}")
+        f"Test set x_0_mse @ t=200 (<= {test_iters} imgs): "
+        f"{np.mean([i['x_0_mse'][0][199].cpu().item() for i in vlb])} "
+        f"+- {np.std([i['x_0_mse'][0][199].cpu().item() for i in vlb])}"
+    )
     print(
-        f"Test set mse @ t=200: {np.mean([i['mse'][0][199].cpu().item() for i in vlb])} "
-        f"+- {np.std([i['mse'][0][199].cpu().item() for i in vlb])}")
-    print(f"Test set PSNR: {np.mean(psnr)} +- {np.std(psnr)}")
+        f"Test set mse @ t=200 (<= {test_iters} imgs): "
+        f"{np.mean([i['mse'][0][199].cpu().item() for i in vlb])} "
+        f"+- {np.std([i['mse'][0][199].cpu().item() for i in vlb])}"
+    )
+    print(f"Test set PSNR (<= {test_iters} imgs): {np.mean(psnr)} +- {np.std(psnr)}")
 
 
 def main():

@@ -102,7 +102,7 @@ def discretised_gaussian_log_likelihood(x, means, log_scales):
     assert log_probs.shape == x.shape
     return log_probs
 
-def add_rician_noise(x, sigma=0.1, rician_ratio=0.2, scale=0.002):
+def add_rician_noise(x, sigma=0.1, rician_ratio=0.7, scale=0.002):
     """
     Rician + Gaussian 혼합 노이즈 추가 함수
 
@@ -126,6 +126,7 @@ def add_rician_noise(x, sigma=0.1, rician_ratio=0.2, scale=0.002):
     # 혼합
     mixed_noise = rician_ratio * noise_rician + (1 - rician_ratio) * noise_gauss
     return mixed_noise
+
 
 def generate_simplex_noise(
         Simplex_instance, x, t, random_param=False, octave=6, persistence=0.8, frequency=64,
@@ -515,8 +516,8 @@ class GaussianDiffusionModel:
         perceptual_weight = 0.1
         perceptual = self.perceptual_loss(pred_x_0, target_x_0)
 
-        total_loss = recon_loss #+ perceptual_weight * perceptual
-        loss = {"loss": total_loss}#, "perceptual": perceptual, "recon": recon_loss}
+        total_loss = recon_loss + perceptual_weight * perceptual
+        loss = {"loss": total_loss, "perceptual": perceptual, "recon": recon_loss}
         return loss, x_t, estimate_noise
 
 
@@ -592,10 +593,7 @@ class GaussianDiffusionModel:
 
         for i in range(7, 0, -1):
             freq = 2 ** i
-            self.noise_fn = lambda x, t: generate_simplex_noise(
-                    self.simplex, x, t, False, frequency=freq,
-                    in_channels=self.img_channels
-                    )
+            self.noise_fn = lambda x, t: add_rician_noise(x, sigma=self.sigma)
 
             for t_distance in range(50, int(args["T"] * 0.6), 50):
                 output = torch.empty((total_avg, 1, *args["img_size"]), device=x_0.device)
@@ -649,7 +647,7 @@ class GaussianDiffusionModel:
                     ).float()
         else:
             end = int(args["T"] * 0.8)
-            self.noise_fn = lambda x, t: torch.randn_like(x)
+            self.noise_fn = lambda x, t: add_rician_noise(x, sigma=self.sigma)
         # multiprocessing?
         dice_coeff = []
         for t_distance in range(50, end, 50):
@@ -704,7 +702,7 @@ class GaussianDiffusionModel:
         for i in range(1, end_freq + 1):
 
             freq = 2 ** i
-            noise_fn = lambda x, t: generate_simplex_noise(self.simplex, x, t, False, frequency=freq).float()
+            noise_fn = lambda x, t: add_rician_noise(x, sigma=self.sigma)
 
             t_tensor = torch.tensor([t_distance - 1], device=x_0.device).repeat(x_0.shape[0])
             x = self.sample_q(

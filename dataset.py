@@ -333,9 +333,25 @@ class MRIDataset(Dataset):
                             np.float32
                             )
                     )
+        
         if self.random_slice:
             # slice_idx = randint(32, 122)
-            slice_idx = randint(40, 100)
+            slice_idx = 96
+        else:
+            slice_idx = 96
+
+        image = image[:, :, slice_idx:slice_idx + 1].reshape(256, 256).astype(np.float32)
+
+        if self.transform:
+            image = self.transform(image)
+
+        sample = {'image': image, "filenames": self.filenames[idx]}
+        return sample
+        
+        '''
+        if self.random_slice:
+            # slice_idx = randint(32, 122)
+            slice_idx = 80
         else:
             slice_idx = 80
 
@@ -346,8 +362,7 @@ class MRIDataset(Dataset):
 
         sample = {'image': image, "filenames": self.filenames[idx]}
         return sample
-
-
+        '''
 class AnomalousMRIDataset(Dataset):
     """Anomalous MRI dataset."""
 
@@ -367,8 +382,8 @@ class AnomalousMRIDataset(Dataset):
         """
         self.transform = transforms.Compose(
                 [transforms.ToPILImage(),
-                 transforms.CenterCrop((175, 240)),
-                 # transforms.RandomAffine(0, translate=(0.02, 0.1)),
+                 #transforms.CenterCrop((175, 240)),
+                 #transforms.RandomAffine(0, translate=(0.02, 0.1)),
                  transforms.Resize(img_size, transforms.InterpolationMode.BILINEAR),
                  # transforms.CenterCrop(256),
                  transforms.ToTensor(),
@@ -377,15 +392,34 @@ class AnomalousMRIDataset(Dataset):
                 ) if not transform else transform
         self.img_size = img_size
         self.resized = resized
+        '''self.slices = {
+            "17904": range(0), "18428": range(0), "18582": range(0), "18638": range(0),
+            "18675": range(0), "18716": range(0), "18756": range(0), "18863": range(0),
+            "18886": range(0), "18975": range(0), "19015": range(0), "19085": range(0),
+            "19275": range(0), "19277": range(0), "19357": range(0), "19398": range(0),
+            "19423": range(0), "19567": range(0), "19628": range(0), "19691": range(0)#,
+            #"19723": range(140, 170), "19849": range(150, 180)
+            }'''
         self.slices = {
-            "17904": range(165, 205), "18428": range(177, 213), "18582": range(160, 190), "18638": range(160, 212),
-            "18675": range(140, 200), "18716": range(135, 190), "18756": range(150, 205), "18863": range(130, 190),
-            "18886": range(120, 180), "18975": range(170, 194), "19015": range(158, 195), "19085": range(155, 195),
-            "19275": range(184, 213), "19277": range(158, 209), "19357": range(158, 210), "19398": range(164, 200),
-            "19423": range(142, 200), "19567": range(160, 200), "19628": range(147, 210), "19691": range(155, 200),
-            "19723": range(140, 170), "19849": range(150, 180)
-            }
-
+            "001": range(0), "011": range(0), "039": range(0), "042": range(0),
+            "045": range(0), "047": range(0), "053": range(0), "054": range(0),
+            "055": range(0), "062": range(0), "092": range(0), "096": range(0),
+            "097": range(0), "100": range(0), "104": range(0), "107": range(0),
+            "109": range(0), "118": range(0), "121": range(0), "123": range(0),
+            "124": range(0), "132": range(0), "138": range(0), "144": range(0),
+            "150": range(0), "166": range(0), "168": range(0), "180": range(0),
+            "181": range(0), "183": range(0), "184": range(0), "191": range(0),
+            "192": range(0), "194": range(0), "201": range(0), "202": range(0),
+            "212": range(0), "216": range(0), "221": range(0), "223": range(0),
+            "224": range(0), "225": range(0), "238": range(0), "246": range(0),
+            "251": range(0), "252": range(0), "254": range(0), "255": range(0),
+            "257": range(0), "258": range(0), "270": range(0), "284": range(0),
+            "285": range(0), "293": range(0), "299": range(0), "307": range(0),
+            "318": range(0), "319": range(0), "334": range(0), "336": range(0),
+            "338": range(0), "339": range(0), "340": range(0), "343": range(0),
+            "346": range(0)
+        }
+        
         self.filenames = self.slices.keys()
         if cleaned:
             self.filenames = list(map(lambda name: f"{ROOT_DIR}/raw_cleaned/{name}.npy", self.filenames))
@@ -429,11 +463,11 @@ class AnomalousMRIDataset(Dataset):
         sample = {}
 
         if self.resized:
-            img_mask = np.load(f"{self.ROOT_DIR}/mask/{self.filenames[idx][-9:-4]}-resized.npy")
+            img_mask = np.load(f"{self.ROOT_DIR}/mask/{self.filenames[idx][-7:-4]}-resized.npy")
         else:
-            img_mask = np.load(f"{self.ROOT_DIR}/mask/{self.filenames[idx][-9:-4]}.npy")
+            img_mask = np.load(f"{self.ROOT_DIR}/mask/{self.filenames[idx][-7:-4]}.npy")
         if self.slice_selection == "random":
-            temp_range = self.slices[self.filenames[idx][-9:-4]]
+            temp_range = self.slices[self.filenames[idx][-7:-4]]
             slice_idx = randint(temp_range.start, temp_range.stop)
             image = image[slice_idx:slice_idx + 1, :, :].reshape(image.shape[1], image.shape[2]).astype(np.float32)
             if self.transform:
@@ -441,7 +475,7 @@ class AnomalousMRIDataset(Dataset):
                 # image = transforms.functional.rotate(image, -90)
             sample["slices"] = slice_idx
         elif self.slice_selection == "iterateKnown":
-            temp_range = self.slices[self.filenames[idx][-9:-4]]
+            temp_range = self.slices[self.filenames[idx][-7:-4]]
             output = torch.empty(temp_range.stop - temp_range.start, *self.img_size)
             output_mask = torch.empty(temp_range.stop - temp_range.start, *self.img_size)
 
@@ -460,13 +494,13 @@ class AnomalousMRIDataset(Dataset):
 
         elif self.slice_selection == "iterateKnown_restricted":
 
-            temp_range = self.slices[self.filenames[idx][-9:-4]]
+            temp_range = self.slices[self.filenames[idx][-7:-4]]
             output = torch.empty(4, *self.img_size)
             output_mask = torch.empty(4, *self.img_size)
             slices = np.linspace(temp_range.start + 5, temp_range.stop - 5, 4).astype(np.int32)
             for counter, i in enumerate(slices):
-                temp = image[i, ...].reshape(image.shape[1], image.shape[2]).astype(np.float32)
-                temp_mask = img_mask[i, ...].reshape(image.shape[1], image.shape[2]).astype(np.float32)
+                temp = image.reshape(image.shape[0], image.shape[1]).astype(np.float32)
+                temp_mask = img_mask.reshape(image.shape[0], image.shape[1]).astype(np.float32)
                 if self.transform:
                     temp = self.transform(temp)
                     temp_mask = self.transform(temp_mask)

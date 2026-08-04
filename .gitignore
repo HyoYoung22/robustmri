@@ -1,0 +1,51 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local agent/editor state
+.agents/
+.codex/
+.vscode/
+.idea/
+
+# MRI datasets and generated NumPy data
+datasets/
+DATASETS/
+DATASETS_*/
+npy_data/
+singlecoil_test/
+singlecoil_test_npy/
+*.nii
+*.nii.gz
+*.npy
+*.h5
+*.hdf5
+
+# Model weights and checkpoints
+model/
+checkpoints*/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Training and evaluation outputs
+diffusion-training-images/
+diffusion-videos/
+eval_out/
+eval_result/
+metrics/
+segment*/
+tumorseg*.coco-segmentation/
+
+# Large local archives
+*.tar
+*.tar.gz
+*.zip
+
+# OS-generated files
+.DS_Store
+Thumbs.db

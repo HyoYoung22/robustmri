@@ -4,15 +4,15 @@ import random
 import matplotlib.pyplot as plt
 import numpy as np
 
-import evaluation
+from importlib import import_module
 from helpers import *
-from simplex import Simplex_CLASS
 
 from pytorch_msssim import ssim
 import torch.nn.functional as F
 from torchvision import models
 import torch.nn as nn
 
+import os
 
 import torch.nn.functional as F
 import torchvision.transforms as T
@@ -127,60 +127,57 @@ def add_rician_noise(x, sigma=0.1, rician_ratio=0.7, scale=0.002):
     mixed_noise = rician_ratio * noise_rician + (1 - rician_ratio) * noise_gauss
     return mixed_noise
 
-
-def generate_simplex_noise(
-        Simplex_instance, x, t, random_param=False, octave=6, persistence=0.8, frequency=64,
-        in_channels=1
-        ):
-    noise = torch.empty(x.shape).to(x.device)
-    for i in range(in_channels):
-        Simplex_instance.newSeed()
-        if random_param:
-            param = random.choice(
-                    [(2, 0.6, 16), (6, 0.6, 32), (7, 0.7, 32), (10, 0.8, 64), (5, 0.8, 16), (4, 0.6, 16), (1, 0.6, 64),
-                     (7, 0.8, 128), (6, 0.9, 64), (2, 0.85, 128), (2, 0.85, 64), (2, 0.85, 32), (2, 0.85, 16),
-                     (2, 0.85, 8),
-                     (2, 0.85, 4), (2, 0.85, 2), (1, 0.85, 128), (1, 0.85, 64), (1, 0.85, 32), (1, 0.85, 16),
-                     (1, 0.85, 8),
-                     (1, 0.85, 4), (1, 0.85, 2), ]
-                    )
-            # 2D octaves seem to introduce directional artifacts in the top left
-            noise[:, i, ...] = torch.unsqueeze(
-                    torch.from_numpy(
-                            # Simplex_instance.rand_2d_octaves(
-                            #         x.shape[-2:], param[0], param[1],
-                            #         param[2]
-                            #         )
-                            Simplex_instance.rand_3d_fixed_T_octaves(
-                                    x.shape[-2:], t.detach().cpu().numpy(), param[0], param[1],
-                                    param[2]
-                                    )
-                            ).to(x.device), 0
-                    ).repeat(x.shape[0], 1, 1, 1)
-        noise[:, i, ...] = torch.unsqueeze(
-                torch.from_numpy(
-                        # Simplex_instance.rand_2d_octaves(
-                        #         x.shape[-2:], octave,
-                        #         persistence, frequency
-                        #         )
-                        Simplex_instance.rand_3d_fixed_T_octaves(
-                                x.shape[-2:], t.detach().cpu().numpy(), octave,
-                                persistence, frequency
-                                )
-                        ).to(x.device), 0
-                ).repeat(x.shape[0], 1, 1, 1)
-    return noise
+def simulate_rician_mri(x, sigma=0.1):
+    """
+    clean MRI magnitude image -> noisy MRI magnitude image
+    """
+    noise_real = torch.randn_like(x) * sigma
+    noise_imag = torch.randn_like(x) * sigma
+    y = torch.sqrt(torch.clamp((x + noise_real) ** 2 + noise_imag ** 2, min=1e-12))
+    return y
 
 
-def random_noise(Simplex_instance, x, t):
-    param = random.choice(
-            ["gauss", "simplex"]
-            )
-    if param == "gauss":
-        return torch.randn_like(x)
-    else:
-        return generate_simplex_noise(Simplex_instance, x, t)
+def vst(x, sigma=0.1, eps=1e-8):
+    """
+    VST transform
+    """
+    if not torch.is_tensor(sigma):
+        sigma = torch.tensor(sigma, device=x.device, dtype=x.dtype)
 
+    while sigma.ndim < x.ndim:
+        sigma = sigma.view(*sigma.shape, *([1] * (x.ndim - sigma.ndim)))
+
+    return torch.sqrt(torch.clamp((x / (sigma + eps)) ** 2 + 3.0 / 8.0, min=0.0))
+
+
+def inverse_vst(x, sigma=0.1, eps=1e-8):
+    """
+    approximate inverse VST
+    """
+    if not torch.is_tensor(sigma):
+        sigma = torch.tensor(sigma, device=x.device, dtype=x.dtype)
+
+    while sigma.ndim < x.ndim:
+        sigma = sigma.view(*sigma.shape, *([1] * (x.ndim - sigma.ndim)))
+
+    return (sigma + eps) * torch.sqrt(torch.clamp(x ** 2 - 3.0 / 8.0, min=0.0))
+
+
+def normalize_vst(x, eps=1e-8):
+    """
+    normalize to [-1, 1]
+    """
+    x_min = x.amin(dim=(2, 3), keepdim=True)
+    x_max = x.amax(dim=(2, 3), keepdim=True)
+    x_norm = 2.0 * (x - x_min) / (x_max - x_min + eps) - 1.0
+    return x_norm, x_min, x_max
+
+
+def denormalize_vst(x, x_min, x_max):
+    """
+    inverse normalization from [-1, 1]
+    """
+    return 0.5 * (x + 1.0) * (x_max - x_min) + x_min
 
 class VGGPerceptualLoss(nn.Module):
     def __init__(self, resize=True):
@@ -223,24 +220,20 @@ class GaussianDiffusionModel:
             img_channels=1,
             loss_type="l2",  # l2,l1 hybrid
             loss_weight='none',  # prop t / uniform / None
-            noise="rician",  # gauss / perlin / simplex
-            sigma=0.5
+            noise="rician",  # gauss / rician
+            sigma=0.05,
+            domain='rgdm'
             ):
         super().__init__()
         self.sigma = sigma
-        self.perceptual_loss = VGGPerceptualLoss()
+        self.domain = domain
+        self.perceptual_loss = None if domain == "vst" else VGGPerceptualLoss()
         if noise == "gauss":
             self.noise_fn = lambda x, t: torch.randn_like(x)
         elif noise == "rician":
             self.noise_fn = lambda x, t: add_rician_noise(x, sigma=self.sigma)
         else:
-            self.simplex = Simplex_CLASS()
-            if noise == "simplex_randParam":
-                self.noise_fn = lambda x, t: generate_simplex_noise(self.simplex, x, t, True, in_channels=img_channels)
-            elif noise == "random":
-                self.noise_fn = lambda x, t: random_noise(self.simplex, x, t)
-            else:
-                self.noise_fn = lambda x, t: generate_simplex_noise(self.simplex, x, t, False, in_channels=img_channels)
+            raise ValueError(f"Unsupported noise '{noise}'. Use 'gauss' or 'rician'.")
 
         self.img_size = img_size
         self.img_channels = img_channels
@@ -388,19 +381,21 @@ class GaussianDiffusionModel:
 
     def sample_p(self, model, x_t, t, denoise_fn="rician"):
         out = self.p_mean_variance(model, x_t, t)
-        # noise = torch.randn_like(x_t)
-        if type(denoise_fn) == str:
-            if denoise_fn == "gauss":
-                noise = torch.randn_like(x_t)
-            elif denoise_fn == "rician":
-                noise = self.noise_fn(x_t, t).float()
-            elif denoise_fn == "random":
-                # noise = random_noise(self.simplex, x_t, t).float()
-                noise = torch.randn_like(x_t)
+
+        if self.domain == "vst":
+            noise = torch.randn_like(x_t)
+        else:
+            if type(denoise_fn) == str:
+                if denoise_fn == "gauss":
+                    noise = torch.randn_like(x_t)
+                elif denoise_fn == "rician":
+                    noise = self.noise_fn(x_t, t).float()
+                elif denoise_fn == "random":
+                    noise = torch.randn_like(x_t)
+                else:
+                    noise = self.noise_fn(x_t, t).float()
             else:
                 noise = self.noise_fn(x_t, t).float()
-        else:
-            noise = self.noise_fn(x_t, t).float()
 
         nonzero_mask = (
             (t != 0).float().view(-1, *([1] * (len(x_t.shape) - 1)))
@@ -418,24 +413,41 @@ class GaussianDiffusionModel:
 
         if t_distance is None:
             t_distance = self.num_timesteps
-        seq = [x.cpu().detach()]
-        if see_whole_sequence == "whole":
 
+        # VST domain에서는 입력 x를 raw image로 받아서 내부에서 변환
+        if self.domain == "vst":
+            x = x.clamp(0, 1)
+            x = simulate_rician_mri(x, sigma=self.sigma)
+            x = vst(x, sigma=self.sigma)
+            x, x_vst_min, x_vst_max = normalize_vst(x)
+            denoise_fn = "gauss"
+
+        seq = [x.cpu().detach()]
+
+        if see_whole_sequence == "whole":
             for t in range(int(t_distance)):
                 t_batch = torch.tensor([t], device=x.device).repeat(x.shape[0])
-                # noise = torch.randn_like(x)
-                noise = self.noise_fn(x, t_batch).float()
+
+                if self.domain == "vst":
+                    noise = torch.randn_like(x)
+                else:
+                    noise = self.noise_fn(x, t_batch).float()
+
                 with torch.no_grad():
                     x = self.sample_q_gradual(x, t_batch, noise)
 
                 seq.append(x.cpu().detach())
         else:
-            # x = self.sample_q(x,torch.tensor([t_distance], device=x.device).repeat(x.shape[0]),torch.randn_like(x))
             t_tensor = torch.tensor([t_distance - 1], device=x.device).repeat(x.shape[0])
-            x = self.sample_q(
-                    x, t_tensor,
-                    self.noise_fn(x, t_tensor).float()
-                    )
+
+            if self.domain == "vst":
+                x = self.sample_q(x, t_tensor, torch.randn_like(x))
+            else:
+                x = self.sample_q(
+                        x, t_tensor,
+                        self.noise_fn(x, t_tensor).float()
+                        )
+
             if see_whole_sequence == "half":
                 seq.append(x.cpu().detach())
 
@@ -446,6 +458,10 @@ class GaussianDiffusionModel:
                 x = out["sample"]
             if see_whole_sequence:
                 seq.append(x.cpu().detach())
+
+        if self.domain == "vst":
+            x = denormalize_vst(x, x_vst_min, x_vst_max)
+            x = inverse_vst(x, sigma=self.sigma).clamp(0, 1)
 
         return x.detach() if not see_whole_sequence else seq
 
@@ -488,6 +504,48 @@ class GaussianDiffusionModel:
         return {"output": nll, "pred_x_0": output["pred_x_0"]}
 
     def calc_loss(self, model, x_0, t):
+        x_0 = x_0.clamp(0, 1)
+
+        # ==========================================================
+        # VST branch
+        # ==========================================================
+        if self.domain == "vst":
+            self.sigma = np.random.uniform(0.01, 0.10)
+
+            # noisy input 생성 (diffusion input)
+            x_noisy = simulate_rician_mri(x_0, sigma=self.sigma)
+
+            # clean / noisy 둘 다 VST 변환
+            x_vst_clean = vst(x_0, sigma=self.sigma)
+            x_vst_noisy = vst(x_noisy, sigma=self.sigma)
+
+            # normalize (같은 scale 사용)
+            x_vst_noisy, x_min, x_max = normalize_vst(x_vst_noisy)
+            x_vst_clean = 2.0 * (x_vst_clean - x_min) / (x_max - x_min + 1e-8) - 1.0
+
+            # diffusion
+            noise = torch.randn_like(x_vst_noisy)
+            x_t = self.sample_q(x_vst_noisy, t, noise)
+            estimate_noise = model(x_t, t)
+
+            pred_x_0 = self.predict_x_0_from_eps(x_t, t, estimate_noise).clamp(-1, 1)
+            target_x_0 = x_vst_clean.clamp(-1, 1)
+
+            if self.loss_type == "l1":
+                recon_loss = F.l1_loss(pred_x_0, target_x_0)
+            else:
+                recon_loss = F.mse_loss(pred_x_0, target_x_0)
+
+            perceptual_weight = 0.0
+            perceptual = torch.tensor(0.0, device=x_0.device)
+
+            total_loss = recon_loss
+            loss = {"loss": total_loss, "perceptual": perceptual, "recon": recon_loss}
+            return loss, x_t, estimate_noise
+
+        # ==========================================================
+        # original raw branch
+        # ==========================================================
         self.sigma = np.random.uniform(0.01, 1.0)
         noise = add_rician_noise(x_0, sigma=self.sigma).float()
         x_t = self.sample_q(x_0, t, noise)
@@ -496,11 +554,9 @@ class GaussianDiffusionModel:
         pred_x_0 = self.predict_x_0_from_eps(x_t, t, estimate_noise).clamp(0, 1)
         target_x_0 = x_0.clamp(0, 1)
 
-        # ✅ 밝기 기반 weight
         brightness_weight = 1.0 - x_0.clamp(0, 1)
         brightness_weight = brightness_weight ** 2
 
-        # ✅ 가중치 적용 손실
         if self.loss_type == "l1":
             recon_loss = ((estimate_noise - noise).abs() * brightness_weight).mean()
         elif self.loss_type == "l2":
@@ -512,7 +568,6 @@ class GaussianDiffusionModel:
         else:
             recon_loss = ((estimate_noise - noise).square() * brightness_weight).mean()
 
-        # Perceptual loss (기존 유지)
         perceptual_weight = 0.1
         perceptual = self.perceptual_loss(pred_x_0, target_x_0)
 
@@ -581,167 +636,3 @@ class GaussianDiffusionModel:
             "x_0_mse":   x_0_mse,
             "mse":       mse,
             }
-
-    def detection_A(self, model, x_0, args, file, mask, total_avg=2):
-        for i in [f"./diffusion-videos/ARGS={args['arg_num']}/Anomalous/{file[0]}",
-                  f"./diffusion-videos/ARGS={args['arg_num']}/Anomalous/{file[0]}/{file[1]}/",
-                  f"./diffusion-videos/ARGS={args['arg_num']}/Anomalous/{file[0]}/{file[1]}/A"]:
-            try:
-                os.makedirs(i)
-            except OSError:
-                pass
-
-        for i in range(7, 0, -1):
-            freq = 2 ** i
-            self.noise_fn = lambda x, t: add_rician_noise(x, sigma=self.sigma)
-
-            for t_distance in range(50, int(args["T"] * 0.6), 50):
-                output = torch.empty((total_avg, 1, *args["img_size"]), device=x_0.device)
-                for avg in range(total_avg):
-
-                    t_tensor = torch.tensor([t_distance], device=x_0.device).repeat(x_0.shape[0])
-                    x = self.sample_q(
-                            x_0, t_tensor,
-                            self.noise_fn(x_0, t_tensor).float()
-                            )
-
-                    for t in range(int(t_distance) - 1, -1, -1):
-                        t_batch = torch.tensor([t], device=x.device).repeat(x.shape[0])
-                        with torch.no_grad():
-                            out = self.sample_p(model, x, t_batch)
-                            x = out["sample"]
-
-                    output[avg, ...] = x
-
-                # save image containing initial, each final denoised image, mean & mse
-                output_mean = torch.mean(output, dim=0).reshape(1, 1, *args["img_size"])
-                mse = ((output_mean - x_0).square() * 2) - 1
-                mse_threshold = mse > 0
-                mse_threshold = (mse_threshold.float() * 2) - 1
-                out = torch.cat([x_0, output[:3], output_mean, mse, mse_threshold, mask])
-
-                temp = os.listdir(f'./diffusion-videos/ARGS={args["arg_num"]}/Anomalous/{file[0]}/{file[1]}/A')
-
-                plt.imshow(gridify_output(out, 4), cmap='gray')
-                plt.axis('off')
-                plt.savefig(
-                        f'./diffusion-videos/ARGS={args["arg_num"]}/Anomalous/{file[0]}/{file[1]}/A/freq={i}-t'
-                        f'={t_distance}-{len(temp) + 1}.png'
-                        )
-                plt.clf()
-
-    def detection_B(self, model, x_0, args, file, mask, denoise_fn="rician", total_avg=5):
-        assert type(file) == tuple
-        for i in [f"./diffusion-videos/ARGS={args['arg_num']}/Anomalous/{file[0]}",
-                  f"./diffusion-videos/ARGS={args['arg_num']}/Anomalous/{file[0]}/{file[1]}",
-                  f"./diffusion-videos/ARGS={args['arg_num']}/Anomalous/{file[0]}/{file[1]}/{denoise_fn}"]:
-            try:
-                os.makedirs(i)
-            except OSError:
-                pass
-        if denoise_fn == "octave":
-            end = int(args["T"] * 0.6)
-            self.noise_fn = lambda x, t: generate_simplex_noise(
-                    self.simplex, x, t, False, frequency=64, octave=6,
-                    persistence=0.8
-                    ).float()
-        else:
-            end = int(args["T"] * 0.8)
-            self.noise_fn = lambda x, t: add_rician_noise(x, sigma=self.sigma)
-        # multiprocessing?
-        dice_coeff = []
-        for t_distance in range(50, end, 50):
-            output = torch.empty((total_avg, 1, *args["img_size"]), device=x_0.device)
-            for avg in range(total_avg):
-
-                t_tensor = torch.tensor([t_distance], device=x_0.device).repeat(x_0.shape[0])
-                x = self.sample_q(
-                        x_0, t_tensor,
-                        self.noise_fn(x_0, t_tensor).float()
-                        )
-
-                for t in range(int(t_distance) - 1, -1, -1):
-                    t_batch = torch.tensor([t], device=x.device).repeat(x.shape[0])
-                    with torch.no_grad():
-                        out = self.sample_p(model, x, t_batch)
-                        x = out["sample"]
-
-                output[avg, ...] = x
-
-            # save image containing initial, each final denoised image, mean & mse
-            output_mean = torch.mean(output, dim=[0]).reshape(1, 1, *args["img_size"])
-
-            temp = os.listdir(f'./diffusion-videos/ARGS={args["arg_num"]}/Anomalous/{file[0]}/{file[1]}/{denoise_fn}')
-
-            dice = evaluation.heatmap(
-                    real=x_0, recon=output_mean, mask=mask,
-                    filename=f'./diffusion-videos/ARGS={args["arg_num"]}/Anomalous/{file[0]}/{file[1]}/'
-                             f'{denoise_fn}/heatmap-t={t_distance}-{len(temp) + 1}.png'
-                    )
-
-            mse = ((output_mean - x_0).square() * 2) - 1
-            mse_threshold = mse > 0
-            mse_threshold = (mse_threshold.float() * 2) - 1
-            out = torch.cat([x_0, output[:3], output_mean, mse, mse_threshold, mask])
-
-            plt.imshow(gridify_output(out, 4), cmap='gray')
-            plt.axis('off')
-            plt.savefig(
-                    f'./diffusion-videos/ARGS={args["arg_num"]}/Anomalous/{file[0]}/{file[1]}/{denoise_fn}/t'
-                    f'={t_distance}-{len(temp) + 1}.png'
-                    )
-            plt.clf()
-
-            dice_coeff.append(dice)
-        return dice_coeff
-
-    def detection_A_fixedT(self, model, x_0, args, mask, end_freq=6):
-        t_distance = 250
-
-        output = torch.empty((6 * end_freq, 1, *args["img_size"]), device=x_0.device)
-        for i in range(1, end_freq + 1):
-
-            freq = 2 ** i
-            noise_fn = lambda x, t: add_rician_noise(x, sigma=self.sigma)
-
-            t_tensor = torch.tensor([t_distance - 1], device=x_0.device).repeat(x_0.shape[0])
-            x = self.sample_q(
-                    x_0, t_tensor,
-                    noise_fn(x_0, t_tensor).float()
-                    )
-            x_noised = x.clone().detach()
-            for t in range(int(t_distance) - 1, -1, -1):
-                t_batch = torch.tensor([t], device=x.device).repeat(x.shape[0])
-                with torch.no_grad():
-                    out = self.sample_p(model, x, t_batch, denoise_fn=noise_fn)
-                    x = out["sample"]
-
-            mse = ((x_0 - x).square() * 2) - 1
-            mse_threshold = mse > 0
-            mse_threshold = (mse_threshold.float() * 2) - 1
-
-            output[(i - 1) * 6:i * 6, ...] = torch.cat((x_0, x_noised, x, mse, mse_threshold, mask))
-
-        return output
-
-
-x = """
-Two methods of detection:
-
-A - using varying simplex frequencies
-B - using octave based simplex noise
-C - gaussian based (same as B but gaussian)
-
-
-A: for i in range(6,0,-1):
-    2**i == frequency
-   Frequency = 64: Sample 10 times at t=50, denoise and average
-   Repeat at t = range (50, ARGS["sample distance"], 50)
-   
-   Note simplex noise is fixed frequency ie no octave mixure
-   
-B: Using some initial "good" simplex octave parameters such as 64 freq, oct = 6, persistence= 0.9   
-   Sample 10 times at t=50, denoise and average
-   Repeat at t = range (50, ARGS["sample distance"], 50)
-   
-"""

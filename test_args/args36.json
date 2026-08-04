@@ -9,12 +9,12 @@
   "base_channels": 128,
   "beta_schedule": "linear",
   "channel_mults": "",
-  "loss-type": "hybrid",
+  "loss-type": "l2",
   "loss_weight": "none",
   "train_start": true,
   "lr": 1e-4,
-  "random_slice": false,
-  "sample_distance": 1000,
+  "random_slice": true,
+  "sample_distance": 800,
   "weight_decay": 0.0,
   "save_imgs": true,
   "save_vids": true,
@@ -22,6 +22,6 @@
   "attention_resolutions": "16,8",
   "num_heads": 2,
   "num_head_channels": -1,
-  "noise_fn": "rician",
-  "dataset": "knee"
+  "noise_fn": "simplex",
+  "dataset": "mri"
 }

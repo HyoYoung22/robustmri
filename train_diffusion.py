@@ -3,21 +3,26 @@ import copy
 import sys
 import time
 from random import seed
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib import animation
 from torch import optim
 
-import dataset
-import evaluation
-from GaussianDiffusion import GaussianDiffusionModel, get_beta_schedule
+from experiment_registry import load_experiment_components
 from helpers import *
 from UNet import UNetModel, update_ema_params
 
 torch.cuda.empty_cache()
 
-ROOT_DIR = "./"
+PROJECT_ROOT = Path(__file__).parent
+MODEL_DIR = PROJECT_ROOT / "model"
+VIDEO_DIR = PROJECT_ROOT / "diffusion-videos"
+TRAIN_IMAGE_DIR = PROJECT_ROOT / "diffusion-training-images"
+dataset = None
+GaussianDiffusionModel = None
+get_beta_schedule = None
 
 
 def train(training_dataset_loader, testing_dataset_loader, args, resume):
@@ -31,9 +36,6 @@ def train(training_dataset_loader, testing_dataset_loader, args, resume):
     """
 
     in_channels = 1
-    if args["dataset"].lower() == "cifar" or args["dataset"].lower() == "leather":
-        in_channels = 3
-
     if args["channels"] != "":
         in_channels = args["channels"]
 
@@ -47,7 +49,8 @@ def train(training_dataset_loader, testing_dataset_loader, args, resume):
 
     diffusion = GaussianDiffusionModel(
             args['img_size'], betas, loss_weight=args['loss_weight'],
-            loss_type=args['loss-type'], noise=args["noise_fn"], img_channels=in_channels
+            loss_type=args['loss-type'], noise=args["noise_fn"], img_channels=in_channels,
+            domain=args["method"]
             )
 
     if resume:
@@ -80,8 +83,7 @@ def train(training_dataset_loader, testing_dataset_loader, args, resume):
     start_time = time.time()
     losses = []
     vlb = collections.deque([], maxlen=10)
-    iters = range(100 // args['Batch_Size']) if args["dataset"].lower() != "cifar" else range(200)
-    # iters = range(100 // args['Batch_Size']) if args["dataset"].lower() != "cifar" else range(150)
+    iters = range(100 // args['Batch_Size'])
 
     # dataset loop
     for epoch in tqdm_epoch:
@@ -89,12 +91,7 @@ def train(training_dataset_loader, testing_dataset_loader, args, resume):
 
         for i in iters:
             data = next(training_dataset_loader)
-            if args["dataset"] == "cifar":
-                # cifar outputs [data,class]
-                x = data[0].to(device)
-            else:
-                x = data["image"]
-                x = x.to(device)
+            x = data["image"].to(device)
 
             loss, estimates = diffusion.p_loss(model, x, args)
 
@@ -150,7 +147,6 @@ def train(training_dataset_loader, testing_dataset_loader, args, resume):
 
     save(unet=model, args=args, optimiser=optimiser, final=True, ema=ema)
 
-    evaluation.testing(testing_dataset_loader, diffusion, ema=ema, args=args, model=model)
 
 
 def save(final, unet, optimiser, args, ema, loss=0, epoch=0):
@@ -174,7 +170,7 @@ def save(final, unet, optimiser, args, ema, loss=0, epoch=0):
                     "ema":                  ema.state_dict(),
                     "args":                 args
                     # 'loss': LOSS,
-                    }, f'{ROOT_DIR}model/diff-params-ARGS={args["arg_num"]}/params-final.pt'
+                    }, MODEL_DIR / f'diff-params-ARGS={args["arg_num"]}' / 'params-final.pt'
                 )
     else:
         torch.save(
@@ -185,7 +181,7 @@ def save(final, unet, optimiser, args, ema, loss=0, epoch=0):
                     "args":                 args,
                     "ema":                  ema.state_dict(),
                     'loss':                 loss,
-                    }, f'{ROOT_DIR}model/diff-params-ARGS={args["arg_num"]}/checkpoint/diff_epoch={epoch}.pt'
+                    }, MODEL_DIR / f'diff-params-ARGS={args["arg_num"]}' / 'checkpoint' / f'diff_epoch={epoch}.pt'
                 )
 
 
@@ -204,8 +200,8 @@ def training_outputs(diffusion, x, est, noisy, epoch, row_size, ema, args, save_
     :return:
     """
     try:
-        os.makedirs(f'./diffusion-videos/ARGS={args["arg_num"]}')
-        os.makedirs(f'./diffusion-training-images/ARGS={args["arg_num"]}')
+        os.makedirs(VIDEO_DIR / f'ARGS={args["arg_num"]}')
+        os.makedirs(TRAIN_IMAGE_DIR / f'ARGS={args["arg_num"]}')
     except OSError:
         pass
     if save_imgs:
@@ -231,7 +227,7 @@ def training_outputs(diffusion, x, est, noisy, epoch, row_size, ema, args, save_
         plt.grid(False)
         plt.imshow(gridify_output(out, row_size), cmap='gray')
 
-        plt.savefig(f'./diffusion-training-images/ARGS={args["arg_num"]}/EPOCH={epoch}.png')
+        plt.savefig(TRAIN_IMAGE_DIR / f'ARGS={args["arg_num"]}' / f'EPOCH={epoch}.png')
         plt.clf()
     if save_vids:
         fig, ax = plt.subplots()
@@ -249,7 +245,7 @@ def training_outputs(diffusion, x, est, noisy, epoch, row_size, ema, args, save_
                     repeat_delay=1000
                     )
 
-            ani.save(f'{ROOT_DIR}diffusion-videos/ARGS={args["arg_num"]}/sample-EPOCH={epoch}.mp4')
+            ani.save(VIDEO_DIR / f'ARGS={args["arg_num"]}' / f'sample-EPOCH={epoch}.mp4')
 
     plt.close('all')
 
@@ -259,8 +255,11 @@ def main():
         Load arguments, run training and testing functions, then remove checkpoint directory
     :return:
     """
+    global dataset, GaussianDiffusionModel, get_beta_schedule, device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     # make directories
-    for i in ['./model/', "./diffusion-videos/", './diffusion-training-images/']:
+    for i in [MODEL_DIR, VIDEO_DIR, TRAIN_IMAGE_DIR]:
         try:
             os.makedirs(i)
         except OSError:
@@ -297,98 +296,59 @@ def main():
         raise ValueError("File Argument is not a json file")
 
     # load the json args
-    with open(f'{ROOT_DIR}test_args/{file}', 'r') as f:
+    with open(PROJECT_ROOT / 'test_args' / file, 'r') as f:
         args = json.load(f)
     args['arg_num'] = file[4:-5]
     args = defaultdict_from_json(args)
 
+    dataset, diffusion_module = load_experiment_components(args)
+    GaussianDiffusionModel = diffusion_module.GaussianDiffusionModel
+    get_beta_schedule = diffusion_module.get_beta_schedule
+
     # make arg specific directories
-    for i in [f'./model/diff-params-ARGS={args["arg_num"]}',
-              f'./model/diff-params-ARGS={args["arg_num"]}/checkpoint',
-              f'./diffusion-videos/ARGS={args["arg_num"]}',
-              f'./diffusion-training-images/ARGS={args["arg_num"]}']:
+    experiment_model_dir = MODEL_DIR / f'diff-params-ARGS={args["arg_num"]}'
+    checkpoint_dir = experiment_model_dir / 'checkpoint'
+    for i in [experiment_model_dir, checkpoint_dir,
+              VIDEO_DIR / f'ARGS={args["arg_num"]}',
+              TRAIN_IMAGE_DIR / f'ARGS={args["arg_num"]}']:
         try:
             os.makedirs(i)
         except OSError:
             pass
 
     print(file, args)
-    if args["channels"] != "":
-        in_channels = args["channels"]
-
-    # if dataset is cifar, load different training & test set
-    if args["dataset"].lower() == "cifar":
-        training_dataset_loader_, testing_dataset_loader_ = dataset.load_CIFAR10(args, True), \
-                                                            dataset.load_CIFAR10(args, False)
-        training_dataset_loader = dataset.cycle(training_dataset_loader_)
-        testing_dataset_loader = dataset.cycle(testing_dataset_loader_)
-    elif args["dataset"].lower() == "carpet":
-        training_dataset = dataset.DAGM(
-                "./DATASETS/CARPET/Class1", False, args["img_size"],
-                False
-                )
-        training_dataset_loader = dataset.init_dataset_loader(training_dataset, args)
-        testing_dataset = dataset.DAGM(
-                "./DATASETS/CARPET/Class1", True, args["img_size"],
-                False
-                )
-        testing_dataset_loader = dataset.init_dataset_loader(testing_dataset, args)
-    elif args["dataset"].lower() == "leather":
-        if in_channels == 3:
-            training_dataset = dataset.MVTec(
-                    "./DATASETS/leather", anomalous=False, img_size=args["img_size"],
-                    rgb=True
-                    )
-            testing_dataset = dataset.MVTec(
-                    "./DATASETS/leather", anomalous=True, img_size=args["img_size"],
-                    rgb=True, include_good=True
-                    )
-        else:
-            training_dataset = dataset.MVTec(
-                    "./DATASETS/leather", anomalous=False, img_size=args["img_size"],
-                    rgb=False
-                    )
-            testing_dataset = dataset.MVTec(
-                    "./DATASETS/leather", anomalous=True, img_size=args["img_size"],
-                    rgb=False, include_good=True
-                    )
-        training_dataset_loader = dataset.init_dataset_loader(training_dataset, args)
-        testing_dataset_loader = dataset.init_dataset_loader(testing_dataset, args)
-    else:
-        # load NFBS dataset
-        training_dataset, testing_dataset = dataset.init_datasets(ROOT_DIR, args)
-        training_dataset_loader = dataset.init_dataset_loader(training_dataset, args)
-        testing_dataset_loader = dataset.init_dataset_loader(testing_dataset, args)
+    training_dataset, testing_dataset = dataset.init_datasets(PROJECT_ROOT, args)
+    training_dataset_loader = dataset.init_dataset_loader(training_dataset, args)
+    testing_dataset_loader = dataset.init_dataset_loader(testing_dataset, args)
 
     # if resuming, loaded model is attached to the dictionary
     loaded_model = {}
     if resume:
         if resume == 1:
-            checkpoints = os.listdir(f'./model/diff-params-ARGS={args["arg_num"]}/checkpoint')
+            checkpoints = os.listdir(checkpoint_dir)
             checkpoints.sort(reverse=True)
             for i in checkpoints:
                 try:
-                    file_dir = f"./model/diff-params-ARGS={args['arg_num']}/checkpoint/{i}"
+                    file_dir = checkpoint_dir / i
                     loaded_model = torch.load(file_dir, map_location=device)
                     break
                 except RuntimeError:
                     continue
 
         else:
-            file_dir = f'./model/diff-params-ARGS={args["arg_num"]}/params-final.pt'
+            file_dir = experiment_model_dir / 'params-final.pt'
             loaded_model = torch.load(file_dir, map_location=device)
 
     # load, pass args
     train(training_dataset_loader, testing_dataset_loader, args, loaded_model)
 
     # remove checkpoints after final_param is saved (due to storage requirements)
-    for file_remove in os.listdir(f'./model/diff-params-ARGS={args["arg_num"]}/checkpoint'):
-        os.remove(os.path.join(f'./model/diff-params-ARGS={args["arg_num"]}/checkpoint', file_remove))
-    os.removedirs(f'./model/diff-params-ARGS={args["arg_num"]}/checkpoint')
+    for file_remove in os.listdir(checkpoint_dir):
+        os.remove(checkpoint_dir / file_remove)
+    checkpoint_dir.rmdir()
 
 
 if __name__ == '__main__':
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     seed(1)
 
     main()

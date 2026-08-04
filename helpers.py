@@ -1,9 +1,12 @@
 import json
 import os
 from collections import defaultdict
+from pathlib import Path
 
 import torch
 import torchvision.utils
+
+PROJECT_ROOT = Path(__file__).parent
 
 
 def gridify_output(img, row_size=-1):
@@ -31,13 +34,14 @@ def load_checkpoint(param, use_checkpoint, device):
     :return:
     """
     if not use_checkpoint:
-        return torch.load(f'./model/diff-params-ARGS={param}/params-final.pt', map_location=device, weights_only=False)
+        return torch.load(PROJECT_ROOT / 'model' / f'diff-params-ARGS={param}' / 'params-final.pt', map_location=device, weights_only=False)
     else:
-        checkpoints = os.listdir(f'./model/diff-params-ARGS={param}/checkpoint')
+        checkpoint_dir = PROJECT_ROOT / 'model' / f'diff-params-ARGS={param}' / 'checkpoint'
+        checkpoints = os.listdir(checkpoint_dir)
         checkpoints.sort(reverse=True)
         for i in checkpoints:
             try:
-                file_dir = f"./model/diff-params-ARGS={param}/checkpoint/{i}"
+                file_dir = checkpoint_dir / i
                 loaded_model = torch.load(file_dir, map_location=device)
                 break
             except RuntimeError:
@@ -55,7 +59,7 @@ def load_parameters(device):
     if len(sys.argv[1:]) > 0:
         params = sys.argv[1:]
     else:
-        params = os.listdir("./model")
+        params = os.listdir(PROJECT_ROOT / "model")
     if ".DS_Store" in params:
         params.remove(".DS_Store")
 
@@ -80,7 +84,7 @@ def load_parameters(device):
             args = output["args"]
         else:
             try:
-                with open(f'./test_args/args{param[17:]}.json', 'r') as f:
+                with open(PROJECT_ROOT / 'test_args' / f'args{param[17:]}.json', 'r') as f:
                     args = json.load(f)
                 args['arg_num'] = param[17:]
                 args = defaultdict_from_json(args)
